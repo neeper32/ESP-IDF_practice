@@ -62,7 +62,7 @@ void app_main(void)
             
             // 보낼 데이터 준비
             twai_message_t tx_msg = {
-                .identifier = 0xAA,            // ID 변경해봄
+                .identifier = 0x100,            // ID 변경해봄
                 .data_length_code = 5,
                 .flags = TWAI_MSG_FLAG_NONE,
             };
