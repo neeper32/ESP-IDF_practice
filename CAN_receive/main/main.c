@@ -44,7 +44,7 @@ void get_time(int *year, int *month, int *day, int *hour, int *min, int *sec);
 
 void app_main(void)
 {
-    // 1. I2C 초기화
+    //I2C 초기화
     i2c_master_init();
     ESP_LOGI(TAG, "I2C Initialized");
 
@@ -76,51 +76,63 @@ void app_main(void)
     }
 
     while (1) {
-        // ==========================================
-        // [송신] 메시지 보내기 (두 번에 나누어 전송)
-        // ==========================================
-        /*
-        // 첫 번째 패킷: "Hello_wo" (8 bytes)
-        twai_message_t tx_msg1 = {
-            .identifier = 0x100,           // ID 설정
-            .data_length_code = 8,         // 데이터 길이
-            .flags = TWAI_MSG_FLAG_NONE,   // 표준 프레임
-        };
-        memcpy(tx_msg1.data, "Hello_wo", 8);
-        twai_transmit(&tx_msg1, pdMS_TO_TICKS(100)); // 전송
-
-        // 두 번째 패킷: "rld" (3 bytes)
-        twai_message_t tx_msg2 = {
-            .identifier = 0x100,           // 같은 ID 사용 (혹은 구분하려면 다르게)
-            .data_length_code = 3,
-            .flags = TWAI_MSG_FLAG_NONE,
-        };
-        memcpy(tx_msg2.data, "rld", 3);
-        twai_transmit(&tx_msg2, pdMS_TO_TICKS(100)); // 전송
-
-        ESP_LOGI(TAG, "Sent: Hello_world (Split into 2 frames)");
-        */
-
-        // ==========================================
+        //===========================================
         // [수신] 메시지 받기 (큐에 있는 것 모두 처리)
         // ==========================================
         twai_message_t rx_msg;
         
         // while문을 써서 쌓여있는 메시지를 빠르게 다 읽어옵니다.
         while (twai_receive(&rx_msg, pdMS_TO_TICKS(10)) == ESP_OK) {
-            
             get_time(&year, &month, &day, &hour, &min, &sec); //시간 갱신
-            printf("[%02d-%02d-%02d %02d:%02d:%02d] Recv ID[0x%lx] Len[%d]: ", year, month, day, hour, min, sec, rx_msg.identifier, rx_msg.data_length_code);
-            
-            // 데이터 출력
-            for (int i = 0; i < rx_msg.data_length_code; i++) {
-                printf("%c", rx_msg.data[i]);
+
+            // 2. ID에 따라 데이터 해석 및 출력
+            switch (rx_msg.identifier) {
+                
+                // [CASE A] 버튼 (0x100)
+                case 0x100:
+                    printf("--------------------------------------------------\n");
+                    printf("[%02d:%02d:%02d] 🔘 EVENT: Button Clicked!\n", hour, min, sec);
+                    printf("--------------------------------------------------\n");
+                    break;
+
+                // [CASE B] 온습도 (0x200)
+                case 0x200:
+                    if (rx_msg.data_length_code >= 2) {
+                        int temp = rx_msg.data[0];
+                        int hum = rx_msg.data[1];
+                        // 한 줄로 깔끔하게 출력
+                        printf("[%02d:%02d:%02d] 🌡️ DHT11 | Temp: %2d°C  Hum: %2d%%\n", hour, min, sec, temp, hum);
+                    }
+                    break;
+
+                // [CASE C] MPU6500 가속도 (0x300)
+                case 0x300:
+                    if (rx_msg.data_length_code == 6) {
+                        // 1. 데이터 합치기
+                        int16_t raw_ax = (int16_t)((rx_msg.data[0] << 8) | rx_msg.data[1]);
+                        int16_t raw_ay = (int16_t)((rx_msg.data[2] << 8) | rx_msg.data[3]);
+                        int16_t raw_az = (int16_t)((rx_msg.data[4] << 8) | rx_msg.data[5]);
+
+                        // 2. 사람이 보기 편하게 변환 (나누기 16384)
+                        float ax_g = raw_ax / 16384.0;
+                        float ay_g = raw_ay / 16384.0;
+                        float az_g = raw_az / 16384.0;
+
+                        // 3. 소수점 2자리까지 출력
+                        printf("[%02d:%02d:%02d] 🚀 Accel | X: %.2f g  Y: %.2f g  Z: %.2f g\n", 
+                            hour, min, sec, ax_g, ay_g, az_g);
+                    }
+                    break;
+
+                default:
+                    // 알 수 없는 ID가 들어왔을 때
+                    printf("[%02d:%02d:%02d] UNKNOWN ID: 0x%lx Len: %d\n", hour, min, sec, rx_msg.identifier, rx_msg.data_length_code);
+                    break;
             }
-            printf("\n");
         }
 
-        // 0.5초 대기
-        vTaskDelay(pdMS_TO_TICKS(50));
+        // 0.1초 대기
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
