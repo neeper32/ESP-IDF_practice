@@ -1,5 +1,9 @@
 #include <stdio.h>
 #include <string.h>
+#include <sys/unistd.h>
+#include <sys/stat.h>
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -8,18 +12,32 @@
 #include "driver/twai.h" // 여기가 핵심: can.h 대신 twai.h 사용
 
 // 로그 태그
-static const char *TAG = "TWAI_CAN_RTC";
+static const char *TAG = "TWAI_Receive";
 
-// CAN모듈 핀 설정
+//핀 설정
+// CAN 핀 설정
 #define TX_GPIO_NUM     GPIO_NUM_2
 #define RX_GPIO_NUM     GPIO_NUM_1
 
-// --- [설정] 핀 및 I2C 주소 ---
+// RCT 핀 및 I2C 주소
 #define I2C_MASTER_SDA_IO           18    // SDA 핀 (CAN과 겹치지 않게 주의!)
 #define I2C_MASTER_SCL_IO           17    // SCL 핀
 #define I2C_MASTER_NUM              0     // I2C 포트 번호 (0 또는 1)
 #define I2C_MASTER_FREQ_HZ          100000 // 통신 속도 (100kHz)
 #define DS3231_ADDR                 0x68  // DS3231의 I2C 주소
+
+//SD카드 핀
+#define SD_PIN_CS       GPIO_NUM_4
+#define SD_PIN_MOSI     GPIO_NUM_5
+#define SD_PIN_CLK      GPIO_NUM_6
+#define SD_PIN_MISO     GPIO_NUM_7
+
+// 파일 시스템 마운트 지점
+#define MOUNT_POINT "/sdcard"
+
+// --- [전역 변수] ---
+// 파일 이름을 저장할 공간 (예: 20260111_123000.csv)
+char current_filename[64] = {0};
 
 // --- [유틸리티] BCD 변환 함수 ---
 // RTC는 데이터를 10진수가 아닌 BCD(Binary Coded Decimal) 포맷으로 저장합니다.
@@ -40,6 +58,9 @@ void set_time_smart();
 void i2c_master_init();
 void set_time(int year, int month, int day, int hour, int min, int sec);
 void get_time(int *year, int *month, int *day, int *hour, int *min, int *sec);
+esp_err_t init_sd_card();
+void write_to_sd(const char *data);
+void create_new_filename();
 
 
 void app_main(void)
@@ -48,11 +69,28 @@ void app_main(void)
     i2c_master_init();
     ESP_LOGI(TAG, "I2C Initialized");
 
+    // 2. SD 카드 초기화
+    if (init_sd_card() != ESP_OK) {
+        ESP_LOGE(TAG, "SD Card Init Failed! System Halted.");
+        // SD 없으면 멈추게 하려면 return; 추가
+    } else {
+        // 부팅 로그 남기기
+        write_to_sd("SYSTEM_START, Power On Reset\n");
+        // 3. [핵심] 부팅 직후 파일 이름 생성!
+        create_new_filename();
+        
+        // 헤더(제목) 쓰기
+        write_to_sd("TimeStamp, Sensor_Type, Data1, Data2, Data3\n");
+    }
+
     // 2. 시간 설정 (컴파일 시간을 받아서 저장/ 기존시간이 더 최신이면 건너뜀)
     set_time_smart();
 
     //3. 시간 저장을 위한 변수 선언
     int year, month, day, hour, min, sec;
+
+    //파일 저장용 문자열 버퍼
+    char csv_buffer[128]; // 파일 저장용 문자열 버퍼
 
     // 1. 설정 구조체 초기화 (TWAI 접두어 사용)
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(TX_GPIO_NUM, RX_GPIO_NUM, TWAI_MODE_NORMAL);
@@ -93,6 +131,9 @@ void app_main(void)
                     printf("--------------------------------------------------\n");
                     printf("[%02d:%02d:%02d] 🔘 EVENT: Button Clicked!\n", hour, min, sec);
                     printf("--------------------------------------------------\n");
+                    sprintf(csv_buffer, "%04d-%02d-%02d %02d:%02d:%02d, BUTTON, Clicked\n", 
+                            year, month, day, hour, min, sec);
+                    write_to_sd(csv_buffer);
                     break;
 
                 // [CASE B] 온습도 (0x200)
@@ -102,6 +143,9 @@ void app_main(void)
                         int hum = rx_msg.data[1];
                         // 한 줄로 깔끔하게 출력
                         printf("[%02d:%02d:%02d] 🌡️ DHT11 | Temp: %2d°C  Hum: %2d%%\n", hour, min, sec, temp, hum);
+                        sprintf(csv_buffer, "%04d-%02d-%02d %02d:%02d:%02d, DHT11, Temp:%d, Hum:%d\n", 
+                                year, month, day, hour, min, sec, temp, hum);
+                        write_to_sd(csv_buffer);
                     }
                     break;
 
@@ -121,6 +165,11 @@ void app_main(void)
                         // 3. 소수점 2자리까지 출력
                         printf("[%02d:%02d:%02d] 🚀 Accel | X: %.2f g  Y: %.2f g  Z: %.2f g\n", 
                             hour, min, sec, ax_g, ay_g, az_g);
+
+                        // CSV 저장 (숫자만 콤마로 구분하면 엑셀에서 보기 편함)
+                        sprintf(csv_buffer, "%04d-%02d-%02d %02d:%02d:%02d, ACCEL, %.2f, %.2f, %.2f\n", 
+                                year, month, day, hour, min, sec, ax_g, ay_g, az_g);
+                        write_to_sd(csv_buffer);
                     }
                     break;
 
@@ -282,4 +331,69 @@ void get_time(int *year, int *month, int *day, int *hour, int *min, int *sec) {
     *day = bcdToDec(data[4]);
     *month = bcdToDec(data[5]);
     *year = bcdToDec(data[6]) + 2000;
+}
+
+// ====================================================
+// [SD 카드 관련 함수]
+// ====================================================
+// [핵심 함수] 파일 이름 생성기
+void create_new_filename() {
+    int year, month, day, hour, min, sec;
+    
+    // 1. 현재 RTC 시간 읽기
+    get_time(&year, &month, &day, &hour, &min, &sec);
+
+    // 2. 파일 이름 생성 (형식: /sdcard/YYYYMMDD_HHMMSS.csv)
+    // 예: /sdcard/20260111_153000.csv
+    sprintf(current_filename, "%s/%04d%02d%02d_%02d%02d%02d.csv", 
+            MOUNT_POINT, year, month, day, hour, min, sec);
+            
+    ESP_LOGI(TAG, "New Log File Created: %s", current_filename);
+}
+
+esp_err_t init_sd_card() {
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false, // 포맷 안 함 (중요 데이터를 위해 false 추천)
+        .max_files = 5,
+        .allocation_unit_size = 16 * 1024
+    };
+    sdmmc_card_t *card;
+    
+    // SPI 버스 설정
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = SD_PIN_MOSI,
+        .miso_io_num = SD_PIN_MISO,
+        .sclk_io_num = SD_PIN_CLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4000,
+    };
+    // SPI 버스 초기화 (SPI2_HOST 사용)
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) return ret;
+
+    // SD 카드 슬롯 설정
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;
+    host.max_freq_khz = 5000; // 5MHz (선이 길면 낮추세요)
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = SD_PIN_CS;
+    slot_config.host_id = host.slot;
+
+    return esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+}
+
+void write_to_sd(const char *data) {
+    // 파일 이름이 비어있으면(초기화 실패 등) 실행 안 함
+    if (strlen(current_filename) == 0) return;
+
+    // 아까 만든 전역변수(current_filename)를 사용하여 파일 열기
+    FILE *f = fopen(current_filename, "a");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to write to file: %s", current_filename);
+        return;
+    }
+    fprintf(f, data);
+    fclose(f);
 }
