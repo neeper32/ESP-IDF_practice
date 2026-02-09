@@ -25,8 +25,8 @@ static const char *TAG = "SMART_SWITCH";
 // [서보모터 각도 설정] (설치 환경에 맞춰 조정 필요)
 // 서보모터가 스위치를 '탁' 치고 다시 가운데로 와야 함
 #define ANGLE_CENTER 90  // 중립 (대기 상태)
-#define ANGLE_ON     135  // 켜는 방향으로 밀기
-#define ANGLE_OFF    45 // 끄는 방향으로 밀기
+#define ANGLE_ON     120  // 켜는 방향으로 밀기
+#define ANGLE_OFF    60 // 끄는 방향으로 밀기
 
 // 현재 전등 상태 (0:꺼짐, 1:켜짐)
 int light_state = 0;
